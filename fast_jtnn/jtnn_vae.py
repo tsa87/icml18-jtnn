@@ -9,16 +9,16 @@ from mpn import MPN
 from jtmpn import JTMPN
 from datautils import tensorize
 
+
 from chemutils import enum_assemble, set_atommap, copy_edit_mol, attach_mols
 import rdkit
 import rdkit.Chem as Chem
 import copy, math
+from itertools import chain
 
 import numpy as np
 
 import sys
-sys.path.append('../probtorch')
-import probtorch
 
 class JTNNVAE(nn.Module):
 
@@ -89,63 +89,107 @@ class JTNNVAE(nn.Module):
             z_mol = z_mol.cuda()
 
         return self.decode(z_tree, z_mol, prob_decode)
+    
+    def log_standard_categorical(self, p):
+        """
+        Calculates the cross entropy between a (one-hot) categorical vector
+        and a standard (uniform) categorical distribution.
 
-    def kl_loss(x, x_decoded_mean, z_mean=z_mean, z_log_var=z_log_var):
-        kl_loss = - 0.5 * K.sum(1. + z_log_var - K.square(z_mean) - K.exp(z_log_var), axis=-1)
+        :param p: one-hot categorical distribution
+        :return: H(p, u)
+        """
+        # Uniform prior over y
+        prior = F.softmax(torch.ones_like(p), dim=1)
+        prior.requires_grad = False
 
-        return K.mean(kl_loss)
+        cross_entropy = -torch.sum(prior * torch.log(p + 1e-8), dim=1)
 
-    def logxy_loss(x, x_decoded_mean):
-        x = K.flatten(x)
-        x_decoded_mean = K.flatten(x_decoded_mean)
-        xent_loss = img_rows * img_cols * img_chns * metrics.binary_crossentropy(x, x_decoded_mean)
-
-        # p(y) for observed data is equally distributed
-        logy = np.log(1. / num_classes)
-
-        return xent_loss - logy
-
-    def labeled_vae_loss(x, x_decoded_mean):
-        return logxy_loss(x, x_decoded_mean) + kl_loss(x, x_decoded_mean)
-
-    def cls_loss(y, y_pred, N=1000):
-        alpha = 0.1 * N
-        return alpha * metrics.categorical_crossentropy(y, y_pred)
-
-    def unlabeled_vae_loss(x, x_decoded_mean):
-        entropy = metrics.categorical_crossentropy(_y_output, _y_output)
-        # This is probably not correct, see discussion here: https://github.com/bjlkeng/sandbox/issues/3
-        labeled_loss = logxy_loss(x, x_decoded_mean) + kl_loss(x, x_decoded_mean)
-
-        return K.mean(K.sum(_y_output * labeled_loss, axis=-1)) + entropy
-
-    def forward(self, x_batch, y_batch, beta):
-        x_batch, x_jtenc_holder, x_mpn_holder, x_jtmpn_holder = x_batch
+        return cross_entropy
+    
+    def classify(self, x_batch):
+        x_batch, x_jtenc_holder, x_mpn_holder, x_jtmpn_holder = x_batch  
         x_tree_vecs, x_tree_mess, x_mol_vecs = self.encode(x_jtenc_holder, x_mpn_holder)
 
         y_hat = self.classifier(torch.cat((x_tree_vecs, x_mol_vecs), 1))
+        pred = torch.argmax(y_hat, axis=1)
+        
+        return pred
+        
+    
+    def forward(self, x_batch, y_batch, beta):
+        is_labeled = False if y_batch is None else True
+        
+        x_batch, x_jtenc_holder, x_mpn_holder, x_jtmpn_holder = x_batch  
+        x_tree_vecs, x_tree_mess, x_mol_vecs = self.encode(x_jtenc_holder, x_mpn_holder)
 
-        z_tree_vecs, tree_kl = self.rsample(x_tree_vecs, y_hat, self.T_mean, self.T_var)
-        z_mol_vecs, mol_kl = self.rsample(x_mol_vecs, y_hat, self.G_mean, self.G_var)
+        y_hat = self.classifier(torch.cat((x_tree_vecs, x_mol_vecs), 1))
+        
+        def compute_lxy(y_batch, x_batch, x_tree_vecs, x_tree_mess, x_mol_vecs, x_jtmpn_holder):
+            z_tree_vecs, tree_kl = self.rsample(x_tree_vecs, y_batch, self.T_mean, self.T_var)
+            z_mol_vecs, mol_kl = self.rsample(x_mol_vecs, y_batch, self.G_mean, self.G_var)
 
-        kl_div = tree_kl + mol_kl
-        word_loss, topo_loss, word_acc, topo_acc = self.decoder(x_batch, z_tree_vecs)
-        assm_loss, assm_acc = self.assm(x_batch, x_jtmpn_holder, z_mol_vecs, x_tree_mess)
+            kl_div = tree_kl + mol_kl
 
-        classification_loss = 0
-        y_hat_entropy = 0
-        if y_batch is not None:
-            target = np.argmax(y_batch, axis=1)
-            classification_loss = self.classification_loss(y_hat, target)
+            word_loss, topo_loss, word_acc, topo_acc = self.decoder(x_batch, z_tree_vecs)
+            assm_loss, assm_acc = self.assm(x_batch, x_jtmpn_holder, z_mol_vecs, x_tree_mess)
+
+            logy = torch.mean(self.log_standard_categorical(y_hat))
+            L_xy = word_loss + topo_loss + assm_loss - logy + beta * kl_div
+    
+            return L_xy, kl_div, word_acc, topo_acc, assm_acc
+
+        loss = 0
+        
+        # Running counter
+        kl_div = 0
+        word_acc = 0
+        topo_acc = 0
+        assm_acc = 0
+        clsf_acc = 0
+    
+        if not is_labeled:
+            
+            # Eq(y|x)[-L(x,y)]
+            for i in range(self.y_size):
+                y_batch = torch.zeros((len(x_batch), self.y_size))
+                y_batch[:, i] = 1
+                y_batch = create_var(y_batch)
+            
+                L_xy, kl_tmp, wacc, tacc, aacc = \
+                    compute_lxy(y_batch, x_batch, x_tree_vecs, x_tree_mess, x_mol_vecs, x_jtmpn_holder)
+                
+                loss += L_xy * torch.mean(y_hat[:, i])
+                
+                kl_div += kl_tmp
+                word_acc += wacc
+                topo_acc += tacc
+                assm_acc += aacc
+            
+            # H(q(y|x)
+            y_hat_entropy = torch.sum(y_hat * torch.log(y_hat + 1e-8))
+            loss += y_hat_entropy
+            
+            kl_div /= self.y_size
+            word_acc /= self.y_size
+            topo_acc /= self.y_size
+            assm_acc /= self.y_size
+
         else:
-            y_hat_entropy = torch.sum(y_hat * torch.log(y_hat))
+            
+            L_xy, kl_div, word_acc, topo_acc, assm_acc = \
+                compute_lxy(y_batch, x_batch, x_tree_vecs, x_tree_mess, x_mol_vecs, x_jtmpn_holder)
+            
+            target = torch.argmax(y_batch, axis=1)
+            pred = torch.argmax(y_hat, axis=1)
+            
+            classification_loss = self.classification_loss(y_hat, target)
+            clsf_acc = (target == pred).sum().item() / pred.size(0)
+            
+            loss += L_xy + classification_loss * self.alpha
+                           
+        return loss, kl_div, word_acc, topo_acc, assm_acc, clsf_acc
 
-        loss = word_loss + topo_loss + assm_loss + beta * kl_div + \
-            classification_loss * self.alpha + \
-            y_hat_entropy
-
-        return loss, kl_div.item(), word_acc, topo_acc, assm_acc
-
+   
     def assm(self, mol_batch, jtmpn_holder, x_mol_vecs, x_tree_mess):
         jtmpn_holder,batch_idx = jtmpn_holder
         fatoms,fbonds,agraph,bgraph,scope = jtmpn_holder
