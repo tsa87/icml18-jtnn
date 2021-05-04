@@ -144,13 +144,7 @@ class JTNNVAE(nn.Module):
 
         loss = 0
 
-        # Running counter
-        kl_div = 0
-        word_acc = 0
-        topo_acc = 0
-        assm_acc = 0
-        clsf_acc = 0
-        classification_loss = 0
+        kl_div, word_acc, topo_acc, assm_acc, clsf_acc, clsf_loss = 0, 0, 0, 0, 0, 0
         
         pred = None
         target = None
@@ -162,24 +156,19 @@ class JTNNVAE(nn.Module):
                 y_batch[:, i] = 1
                 y_batch = create_var(y_batch)
 
-                L_xy, kl_tmp, wacc, tacc, aacc = \
+                L_xy, kl, wacc, tacc, aacc = \
                     compute_lxy(y_batch, x_batch, x_tree_vecs, x_tree_mess, x_mol_vecs, x_jtmpn_holder)
-
+                
+                kl_div += kl / self.y_size
+                word_acc += wacc / self.y_size
+                topo_acc += tacc / self.y_size
+                assm_acc += aacc / self.y_size
+                
                 loss += L_xy * torch.mean(y_hat[:, i])
-
-                kl_div += kl_tmp
-                word_acc += wacc
-                topo_acc += tacc
-                assm_acc += aacc
 
             # H(q(y|x)
             y_hat_entropy = torch.sum(y_hat * torch.log(y_hat + 1e-8))
             loss += y_hat_entropy
-
-            kl_div /= self.y_size
-            word_acc /= self.y_size
-            topo_acc /= self.y_size
-            assm_acc /= self.y_size
 
         else:
             y_batch = create_var(y_batch)
@@ -190,12 +179,12 @@ class JTNNVAE(nn.Module):
             target = torch.argmax(y_batch, axis=1)
             pred = torch.argmax(y_hat, axis=1)
             
-            classification_loss = torch.mean(self.classification_loss(y_hat, target))           
+            clsf_loss = torch.mean(self.classification_loss(y_hat, target))           
             clsf_acc = float((target == pred).sum().item()) / pred.size(0)
 
-            loss += L_xy + classification_loss * self.alpha
+            loss += L_xy + clsf_loss * self.alpha
 
-        return loss, classification_loss*self.alpha, kl_div, word_acc, topo_acc, assm_acc, clsf_acc, (pred, target)
+        return loss, clsf_loss*self.alpha, kl_div, word_acc, topo_acc, assm_acc, clsf_acc, (pred, target)
 
    
     def assm(self, mol_batch, jtmpn_holder, x_mol_vecs, x_tree_mess):
