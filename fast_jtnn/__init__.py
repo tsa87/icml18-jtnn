@@ -4,4 +4,4 @@ from jtnn_enc import JTNNEncoder
 from jtmpn import JTMPN
 from mpn import MPN
 from nnutils import create_var
-from datautils import MolTreeFolder, PairTreeFolder, MolTreeDataset
+from datautils import MolTreeFolder, PairTreeFolder, MolTreeDataset, IndexTracker

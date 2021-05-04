@@ -106,6 +106,7 @@ class JTNNDecoder(nn.Module):
             
             #Message passing
             cur_h_nei = torch.stack(cur_h_nei, dim=0).view(-1,MAX_NB,self.hidden_size)
+            
             new_h = GRU(cur_x, cur_h_nei, self.W_z, self.W_r, self.U_r, self.W_h)
 
             #Node Aggregate

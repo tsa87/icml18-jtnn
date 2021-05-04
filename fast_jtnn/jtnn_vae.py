@@ -22,7 +22,7 @@ import sys
 
 class JTNNVAE(nn.Module):
 
-    def __init__(self, vocab, hidden_size, latent_size, y_size, depthT, depthG, alpha, temp=0.66):
+    def __init__(self, vocab, hidden_size, latent_size, y_size, depthT, depthG, alpha, weight=None, temp=0.66):
         super(JTNNVAE, self).__init__()
         self.vocab = vocab
         self.hidden_size = hidden_size
@@ -35,7 +35,11 @@ class JTNNVAE(nn.Module):
         self.classifier = nn.Sequential(
             nn.Linear(hidden_size*2, y_size),
             nn.Softmax())
-        self.classification_loss = nn.CrossEntropyLoss()
+        
+        if weight is not None:
+            self.classification_loss = nn.CrossEntropyLoss(weight=weight, reduction='none')
+        else:
+            self.classification_loss = nn.CrossEntropyLoss()
 
         self.jtmpn = JTMPN(hidden_size, depthG)
         self.mpn = MPN(hidden_size, depthG)
@@ -118,12 +122,12 @@ class JTNNVAE(nn.Module):
     
     def forward(self, x_batch, y_batch, beta):
         is_labeled = False if y_batch is None else True
-        
+
         x_batch, x_jtenc_holder, x_mpn_holder, x_jtmpn_holder = x_batch  
         x_tree_vecs, x_tree_mess, x_mol_vecs = self.encode(x_jtenc_holder, x_mpn_holder)
 
         y_hat = self.classifier(torch.cat((x_tree_vecs, x_mol_vecs), 1))
-        
+
         def compute_lxy(y_batch, x_batch, x_tree_vecs, x_tree_mess, x_mol_vecs, x_jtmpn_holder):
             z_tree_vecs, tree_kl = self.rsample(x_tree_vecs, y_batch, self.T_mean, self.T_var)
             z_mol_vecs, mol_kl = self.rsample(x_mol_vecs, y_batch, self.G_mean, self.G_var)
@@ -135,59 +139,63 @@ class JTNNVAE(nn.Module):
 
             logy = torch.mean(self.log_standard_categorical(y_hat))
             L_xy = word_loss + topo_loss + assm_loss - logy + beta * kl_div
-    
+
             return L_xy, kl_div, word_acc, topo_acc, assm_acc
 
         loss = 0
-        
+
         # Running counter
         kl_div = 0
         word_acc = 0
         topo_acc = 0
         assm_acc = 0
         clsf_acc = 0
-    
+        classification_loss = 0
+        
+        pred = None
+        target = None
+        
         if not is_labeled:
-            
             # Eq(y|x)[-L(x,y)]
             for i in range(self.y_size):
                 y_batch = torch.zeros((len(x_batch), self.y_size))
                 y_batch[:, i] = 1
                 y_batch = create_var(y_batch)
-            
+
                 L_xy, kl_tmp, wacc, tacc, aacc = \
                     compute_lxy(y_batch, x_batch, x_tree_vecs, x_tree_mess, x_mol_vecs, x_jtmpn_holder)
-                
+
                 loss += L_xy * torch.mean(y_hat[:, i])
-                
+
                 kl_div += kl_tmp
                 word_acc += wacc
                 topo_acc += tacc
                 assm_acc += aacc
-            
+
             # H(q(y|x)
             y_hat_entropy = torch.sum(y_hat * torch.log(y_hat + 1e-8))
             loss += y_hat_entropy
-            
+
             kl_div /= self.y_size
             word_acc /= self.y_size
             topo_acc /= self.y_size
             assm_acc /= self.y_size
 
         else:
-            
+            y_batch = create_var(y_batch)
+
             L_xy, kl_div, word_acc, topo_acc, assm_acc = \
                 compute_lxy(y_batch, x_batch, x_tree_vecs, x_tree_mess, x_mol_vecs, x_jtmpn_holder)
-            
+
             target = torch.argmax(y_batch, axis=1)
             pred = torch.argmax(y_hat, axis=1)
             
-            classification_loss = self.classification_loss(y_hat, target)
-            clsf_acc = (target == pred).sum().item() / pred.size(0)
-            
+            classification_loss = torch.mean(self.classification_loss(y_hat, target))           
+            clsf_acc = float((target == pred).sum().item()) / pred.size(0)
+
             loss += L_xy + classification_loss * self.alpha
-                           
-        return loss, kl_div, word_acc, topo_acc, assm_acc, clsf_acc
+
+        return loss, classification_loss*self.alpha, kl_div, word_acc, topo_acc, assm_acc, clsf_acc, (pred, target)
 
    
     def assm(self, mol_batch, jtmpn_holder, x_mol_vecs, x_tree_mess):
