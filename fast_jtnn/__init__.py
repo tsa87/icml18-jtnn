@@ -1,5 +1,5 @@
 from mol_tree import Vocab, MolTree
-from jtnn_vae import JTNNVAE
+from jtnn_vae import SEMIJTNNVAE
 from jtnn_enc import JTNNEncoder
 from jtmpn import JTMPN
 from mpn import MPN

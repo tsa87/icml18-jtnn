@@ -20,7 +20,7 @@ import numpy as np
 
 import sys
 
-class JTNNVAE(nn.Module):
+class SEMIJTNNVAE(nn.Module):
 
     def __init__(self, vocab, hidden_size, latent_size, y_size, depthT, depthG, alpha, weight=None, temp=0.66):
         super(JTNNVAE, self).__init__()
