@@ -1,6 +1,6 @@
-# Junction Tree Variational Autoencoder for Molecular Graph Generation
+# Semi Supervised Junction Tree Variational Autoencoder 
 
-Official implementation of our Junction Tree Variational Autoencoder [https://arxiv.org/abs/1802.04364](https://arxiv.org/abs/1802.04364)
+Junction Tree Variational Autoencoder [https://arxiv.org/abs/1802.04364](https://arxiv.org/abs/1802.04364) modified for semi-supervised learning.
 
 # Accelerated Version
 We have accelerated our code! The new code is in `fast_jtnn/`, and the VAE training script is in `fast_molvae/`. Please refer to `fast_molvae/README.md` for details.
