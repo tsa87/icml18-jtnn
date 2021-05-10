@@ -133,7 +133,7 @@ class MolTreeFolder(object):
         if replicate is not None: #expand is int
             self.data_files = self.data_files * replicate
     
-    def partition_index(data, shuffle):
+    def partition_index(self, data, fn):
         if self.index_tracker is not None:
             labeled_indices = self.index_tracker.get_labeled_idxs(fn)
             unlabeled_indices = self.index_tracker.get_unlabeled_idxs(fn)
@@ -141,7 +141,7 @@ class MolTreeFolder(object):
             labeled_indices = np.where(data[:,self.label_idx] != "")[0]
             unlabeled_indices = np.where(data[:,self.label_idx] == "")[0]
         
-        if shuffle:
+        if self.shuffle:
             np.random.shuffle(unlabeled_indices)
             np.random.shuffle(labeled_indices)
           
@@ -154,25 +154,26 @@ class MolTreeFolder(object):
                 data = pickle.load(f)
                 data = np.array(data).T
             
-            labeled_indices, unlabeled_indices = partition_index(data, self.shuffle)
+            labeled_indices, unlabeled_indices = self.partition_index(data, fn)
                         
             supervised_data = data[labeled_indices, :]
-            unsupervised_data = data[unlabeled_indices, :]
+            unsupervised_data = data[unlabeled_indices, :]            
             del data
 
             # Create batch
             supervised_moltrees = [supervised_data[i : i + self.batch_size, 0] \
                                   for i in xrange(0, len(supervised_data), self.batch_size)]
-            supervised_labels = [supervised_data[i : i + self.batch_size, self.label_idx] \
+            supervised_labels = [np.array(supervised_data[i : i + self.batch_size, self.label_idx], dtype=np.float32) \
                                   for i in xrange(0, len(supervised_data), self.batch_size)]
             unsupervised_moltrees = [unsupervised_data[i : i + self.batch_size, 0] \
                                   for i in xrange(0, len(unsupervised_data), self.batch_size)]
-            placeholder_labels = [[0 for j in self.batch_size] for i in xrange(0, len(unsupervised_data), self.batch_size)]
+            placeholder_labels = [np.array([0. for j in xrange(0, self.batch_size)], dtype=np.float32) \
+                                  for i in xrange(0, len(unsupervised_data), self.batch_size)]
             del supervised_data, unsupervised_data
             
-            supervised_dataset = MolTreeDataset(supervised_moltree, supervised_labels, self.vocab, self.assm)
-            unsupervised_dataset = MolTreeDataset(unsupervised_moltree, placeholder_labels, self.vocab, self.assm)
-            del supervised_moltree, supervised_labels, unsupervised_moltree, placeholder_labels 
+            supervised_dataset = MolTreeDataset(supervised_moltrees, supervised_labels, self.vocab, self.assm)
+            unsupervised_dataset = MolTreeDataset(unsupervised_moltrees, placeholder_labels, self.vocab, self.assm)
+            del supervised_moltrees, supervised_labels, unsupervised_moltrees, placeholder_labels 
 
             supervised_dataloader = DataLoader(
                 supervised_dataset, num_workers=self.num_workers, batch_size=1, shuffle=False, collate_fn=lambda x:x[0])
