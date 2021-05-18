@@ -3,19 +3,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 
+import numpy as np
+
 def create_var(tensor, requires_grad=None):
     has_cuda = torch.cuda.is_available()
     if requires_grad is None:
-        if has_cuda:
-            return Variable(tensor).cuda()
-        else:
-            return Variable(tensor)
+        var = Variable(tensor)
     else:
-        if has_cuda:
-            return Variable(tensor, requires_grad=requires_grad).cuda()
-        else:
-            return Variable(tensor, requires_grad=requires_grad)
-
+        var = Variable(tensor, requires_grad=requires_grad)
+    return var.cuda() if has_cuda else var
+        
+def create_onehot(batch_size, y_size, col):
+    y_batch = torch.zeros((batch_size, y_size))
+    y_batch[:, col] = 1
+    return create_var(y_batch).float()
 
 def index_select_ND(source, dim, index):
     index_size = index.size()
@@ -71,3 +72,23 @@ def GRU(x, h_nei, W_z, W_r, U_r, W_h):
     pre_h = F.tanh(W_h(h_input))
     new_h = (1.0 - z) * sum_h + z * pre_h
     return new_h
+
+def log_standard_categorical(p):
+    """
+    Calculates the cross entropy between a (one-hot) categorical vector
+    and a standard (uniform) categorical distribution.
+    :param p: one-hot categorical distribution
+    :return: H(p, u)
+    """
+    # Uniform prior over y
+    prior = F.softmax(torch.ones_like(p), dim=1)
+    prior.requires_grad = False
+
+    cross_entropy = -torch.sum(prior * torch.log(p + 1e-8), dim=1)
+    return cross_entropy
+
+def numpy_label_to_onehot_tensor(np_labels, n_nary=2):    
+    batch_size = np.shape(np_labels)[0]
+    labels = torch.from_numpy(np_labels)[:, None].long()
+    labels = torch.zeros(batch_size, n_nary).scatter_(1, labels, 1).float()
+    return labels

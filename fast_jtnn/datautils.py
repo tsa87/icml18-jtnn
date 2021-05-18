@@ -9,9 +9,8 @@ import cPickle as pickle
 import os, random
 from itertools import cycle
 import traceback
-from rdkit import Chem
-from rdkit import DataStructs
-from rdkit.Chem import AllChem
+
+from nnutils import numpy_label_to_onehot_tensor
     
 class PairTreeFolder(object):
 
@@ -68,10 +67,8 @@ class IndexTracker(object):
             full_fp = os.path.join(self.data_folder, fn) 
             with open(full_fp) as f:
                 data = pickle.load(f)
-                data = np.array(data).T
-            
-                labels = data[:, self.label_idx]
-
+                labels = np.array(data[self.label_idx])
+                
                 labeled_idxs = np.where(labels != "")[0]
                 unlabeled_idxs = np.where(labels == "")[0]
                 
@@ -105,34 +102,36 @@ class IndexTracker(object):
     def get_unlabeled_idxs(self, fn):
         return self.unlabeled_idxs_dict[fn]
 
-    
-class MolTreeFolder(object):
+
+class BaseFolder(object):
     def __init__(
         self, 
         data_folder,
-        vocab, 
-        batch_size, 
+        batch_size,
+        feature_idx,
         label_idx, 
         num_workers=4,
-        index_tracker=None,
-        shuffle=True,
-        assm=True,
-        replicate=None,
+        index_tracker=None, # Track which index to obscure
+        shuffle=True, #shuffle the data or not
+        replicate=None, 
+        continous=False, # For Regression y is continous - classification y is discrete
+        test=False, # Test mode, return only labelled data
     ):
-        
         self.data_folder = data_folder
         self.data_files = [fn for fn in os.listdir(data_folder)]
-        self.vocab = vocab
+        self.feature_idx = feature_idx 
+        self.label_idx = label_idx 
         self.num_workers = num_workers
-        self.label_idx = label_idx
         self.index_tracker = index_tracker
         self.batch_size = batch_size
         self.shuffle = shuffle
-        self.assm = assm
-
+        self.Dataset = BaseDataset
+        self.continous = continous
+        self.test = test
+        
         if replicate is not None: #expand is int
             self.data_files = self.data_files * replicate
-    
+        
     def partition_index(self, data, fn):
         if self.index_tracker is not None:
             labeled_indices = self.index_tracker.get_labeled_idxs(fn)
@@ -146,45 +145,110 @@ class MolTreeFolder(object):
             np.random.shuffle(labeled_indices)
           
         return labeled_indices, unlabeled_indices 
-            
+    
+    def _get_dataset(self, supervised_features, supervised_labels, unsupervised_features, placeholder_labels):
+        supervised_dataset = self.Dataset(supervised_features, supervised_labels, self.continous)
+        unsupervised_dataset = self.Dataset(unsupervised_features, placeholder_labels, self.continous)
+        return supervised_dataset, unsupervised_dataset
+    
     def __iter__(self):
-        for fn in self.data_files:
-            fp = os.path.join(self.data_folder, fn)
-            with open(fp) as f:
-                data = pickle.load(f)
-                data = np.array(data).T
-            
-            labeled_indices, unlabeled_indices = self.partition_index(data, fn)
-                        
-            supervised_data = data[labeled_indices, :]
-            unsupervised_data = data[unlabeled_indices, :]            
-            del data
+        self.batches = iter([])
+        return self
+    
+    def next(self):
+        return self.__next__()
+    
+    def __next__(self):    
+        try:
+            return next(self.batches)  
+        except StopIteration:
+            if len(self.data_files) > 0:
+                fn = self.data_files.pop()
+                fp = os.path.join(self.data_folder, fn)
+                with open(fp) as f:               
+                    print fp + " opened"
+                    data = pickle.load(f)
+                    data = np.array(data).T
+                
+                labeled_indices, unlabeled_indices = self.partition_index(data, fn)
+                
+                supervised_data = data[labeled_indices, :]
+                unsupervised_data = data[unlabeled_indices, :]            
+                del data
 
-            # Create batch
-            supervised_moltrees = [supervised_data[i : i + self.batch_size, 0] \
-                                  for i in xrange(0, len(supervised_data), self.batch_size)]
-            supervised_labels = [np.array(supervised_data[i : i + self.batch_size, self.label_idx], dtype=np.float32) \
-                                  for i in xrange(0, len(supervised_data), self.batch_size)]
-            unsupervised_moltrees = [unsupervised_data[i : i + self.batch_size, 0] \
-                                  for i in xrange(0, len(unsupervised_data), self.batch_size)]
-            placeholder_labels = [np.array([0. for j in xrange(0, self.batch_size)], dtype=np.float32) \
-                                  for i in xrange(0, len(unsupervised_data), self.batch_size)]
-            del supervised_data, unsupervised_data
-            
-            supervised_dataset = MolTreeDataset(supervised_moltrees, supervised_labels, self.vocab, self.assm)
-            unsupervised_dataset = MolTreeDataset(unsupervised_moltrees, placeholder_labels, self.vocab, self.assm)
-            del supervised_moltrees, supervised_labels, unsupervised_moltrees, placeholder_labels 
-
-            supervised_dataloader = DataLoader(
-                supervised_dataset, num_workers=self.num_workers, batch_size=1, shuffle=False, collate_fn=lambda x:x[0])
-            unsupervised_dataloader = DataLoader(
-                unsupervised_dataset, num_workers=self.num_workers, batch_size=1, shuffle=False, collate_fn=lambda x:x[0])
+                # Create batch
+                supervised_features = [supervised_data[i : i + self.batch_size, self.feature_idx] \
+                                      for i in xrange(0, len(supervised_data), self.batch_size)]        
+                supervised_labels = [np.array(supervised_data[i : i + self.batch_size, self.label_idx], dtype=np.float32) \
+                                      for i in xrange(0, len(supervised_data), self.batch_size)]
+                unsupervised_features = [unsupervised_data[i : i + self.batch_size, self.feature_idx] \
+                                      for i in xrange(0, len(unsupervised_data), self.batch_size)]
+                placeholder_labels = [np.array([0. for j in xrange(0, self.batch_size)], dtype=np.float32) \
+                                      for i in xrange(0, len(unsupervised_data), self.batch_size)]
+                del supervised_data, unsupervised_data
+                
+                supervised_dataset, unsupervised_dataset = \
+                    self._get_dataset(supervised_features, supervised_labels, unsupervised_features, placeholder_labels)
+                del supervised_features, supervised_labels, unsupervised_features, placeholder_labels 
+                
+                supervised_dataloader = DataLoader(
+                    supervised_dataset, num_workers=self.num_workers, batch_size=1, shuffle=False, collate_fn=lambda x:x[0])
+                unsupervised_dataloader = DataLoader(
+                    unsupervised_dataset, num_workers=self.num_workers, batch_size=1, shuffle=False, collate_fn=lambda x:x[0])
+               
+                
+                if not self.test:
+                    self.batches = iter(zip(cycle(supervised_dataloader), unsupervised_dataloader))
+                else:
+                    self.batches = iter(zip(supervised_dataloader, supervised_dataloader))
+                
+                try:
+                    return next(self.batches)
+                except StopIteration:
+                    print "Open next file"
+                    return self.__next__() 
+            else:
+                raise StopIteration
+       
+    
+class MolTreeFolder(BaseFolder):
+    def __init__(
+        self, 
+        data_folder,
+        vocab, 
+        batch_size,
+        feature_idx,
+        label_idx, 
+        num_workers=4,
+        index_tracker=None,
+        shuffle=True,
+        assm=True,
+        replicate=None,
+        continous=False,
+        test=False,
+    ):
+        super(MolTreeFolder, self).__init__( 
+            data_folder,
+            batch_size,
+            feature_idx,
+            label_idx, 
+            num_workers,
+            index_tracker,
+            shuffle,
+            replicate,
+            continous,
+            test
+        )
         
-            for supervised, unsupervised in zip(cycle(supervised_dataloader), unsupervised_dataloader):
-                yield (supervised, unsupervised)
-                          
-            del supervised_dataset, unsupervised_dataset, unsupervised_dataloader, supervised_dataloader
+        self.vocab = vocab
+        self.assm = assm
+        self.Dataset = MolTreeDataset
 
+    def _get_dataset(self, supervised_features, supervised_labels, unsupervised_features, placeholder_labels):
+        supervised_dataset = self.Dataset(supervised_features, supervised_labels, self.vocab, self.continous, self.assm)
+        unsupervised_dataset = self.Dataset(unsupervised_features, placeholder_labels, self.vocab, self.continous, self.assm)
+        return supervised_dataset, unsupervised_dataset
+    
 class PairTreeDataset(Dataset):
 
     def __init__(self, data, vocab, y_assm):
@@ -202,26 +266,59 @@ class PairTreeDataset(Dataset):
 
 class MolTreeDataset(Dataset):
 
-    def __init__(self, data, labels, vocab, fp=None, assm=True):
+    def __init__(self, data, labels, vocab, continous, fp=None, assm=True):
         self.data = data
         self.labels = labels
         self.vocab = vocab
         self.assm = assm
+        self.continous = continous 
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        try:            
+            if self.continous:
+                label = torch.tensor(self.labels[idx])
+            else:
+                label = numpy_label_to_onehot_tensor(self.labels[idx])    
+                
+            print self.data[idx]
+            return {
+                'data': tensorize(self.data[idx], self.vocab, assm=self.assm),
+                'labels': label
+            }
+        except Exception as e:
+            traceback.print_exc()
+         
+                    
+class BaseDataset(Dataset):
+    def __init__(self, data, labels, continous):             
+        self.data = data
+        self.labels = labels
+        self.continous = continous 
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
         try:
+            size = len(self.data[idx])
+            features = np.zeros((size, 1024))
+            for i in range(size):
+                features[i] = self.data[idx][i]
+            if self.continous:
+                label = torch.tensor(self.labels[idx])
+            else:
+                label = numpy_label_to_onehot_tensor(self.labels[idx])
             return {
-                'data': tensorize(self.data[idx], self.vocab, assm=self.assm),
-                'labels': self.labels[idx]
+                'data': torch.tensor(features).float(),
+                'labels': label
             }
         except Exception as e:
-            print idx
             traceback.print_exc()
-            
-
+                    
+                    
 def tensorize(tree_batch, vocab, assm=True):
     set_batch_nodeID(tree_batch, vocab)
     smiles_batch = [tree.smiles for tree in tree_batch]

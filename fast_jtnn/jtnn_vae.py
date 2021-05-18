@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from mol_tree import Vocab, MolTree
-from nnutils import create_var, flatten_tensor, avg_pool
+from nnutils import create_var, flatten_tensor, avg_pool, create_onehot, log_standard_categorical
 from jtnn_enc import JTNNEncoder
 from jtnn_dec import JTNNDecoder
 from mpn import MPN
@@ -295,27 +295,7 @@ class SemiJTNNVAEClassifier(SemiJTNNVAE):
             self.pred_loss = nn.CrossEntropyLoss(weight=weight, reduction='none')
         else:
             self.pred_loss = nn.CrossEntropyLoss()
-            
-    def _log_standard_categorical(self, p):
-        """
-        Calculates the cross entropy between a (one-hot) categorical vector
-        and a standard (uniform) categorical distribution.
-        :param p: one-hot categorical distribution
-        :return: H(p, u)
-        """
-        # Uniform prior over y
-        prior = F.softmax(torch.ones_like(p), dim=1)
-        prior.requires_grad = False
-
-        cross_entropy = -torch.sum(prior * torch.log(p + 1e-8), dim=1)
-        return cross_entropy
-    
-    def _create_y_batch(self, batch_size, y):
-        y_batch = torch.zeros((batch_size, self.y_size))
-        y_batch[:, y] = 1
-        y_batch = create_var(y_batch)
-        return y_batch
-    
+                
     def classify(self, x_batch):
         y_hat = self.predict(x_batch)    
         return torch.argmax(y_hat, axis=1)
@@ -335,7 +315,7 @@ class SemiJTNNVAEClassifier(SemiJTNNVAE):
         if not is_labeled:
             # Eq(y|x)[-L(x,y)]
             for i in range(self.y_size):
-                y_batch = self._create_y_batch(len(x_batch), i)
+                y_batch = create_onehot(len(x_batch), self.y_size, i)
                     
                 L_xy, kl, wacc, tacc, aacc = \
                     self._compute_partial_loss(y_batch, x_batch, x_tree_vecs, x_tree_mess, x_mol_vecs, x_jtmpn_holder, beta)
@@ -365,13 +345,13 @@ class SemiJTNNVAEClassifier(SemiJTNNVAE):
 
             loss += L_xy + clsf_loss * self.alpha
             
-        logy = torch.mean(self._log_standard_categorical(y_hat))
+        logy = torch.mean(log_standard_categorical(y_hat))
         loss += logy
         
-        return loss, clsf_loss*self.alpha, kl_div, word_acc, topo_acc, assm_acc, clsf_acc, (pred, target)
+        return loss, clsf_loss*self.alpha, clsf_acc, (pred, target)
     
     
-class SemiJTNNVAERegressor(JTNNVAE):
+class SemiJTNNVAERegressor(SemiJTNNVAE):
 
     def __init__(self, vocab, hidden_size, latent_size, y_size, depthT, depthG, alpha):
         super(SemiJTNNVAERegressor, self).__init__(vocab, hidden_size, latent_size, y_size, depthT, depthG, alpha)
@@ -421,4 +401,4 @@ class SemiJTNNVAERegressor(JTNNVAE):
             loss += L_xy + pred_loss * self.alpha
             
         # loss + log(y)
-        return loss, pred_loss*self.alpha, kl_div, word_acc, topo_acc, assm_acc, (pred, target)
+        return loss, pred_loss*self.alpha, (pred, target)
